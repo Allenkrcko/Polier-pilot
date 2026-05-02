@@ -147,18 +147,23 @@ async def twilio_inbound(
         num_media,
     )
 
-    # Enqueue async processing for voice messages (Phase 2: transcription).
-    # Other types are persisted only; Phase 3 will route them too.
-    if msg_type == MessageType.voice and message.media_url:
+    # Enqueue async processing. Voice -> transcription pipeline (Phase 2),
+    # photo -> EXIF + storage pipeline (Phase 3). Text is Phase 4+.
+    if message.media_url and msg_type in (MessageType.voice, MessageType.photo):
         try:
             from app.workers.queue import default_queue
-            from app.workers.tasks import process_voice_message
+            from app.workers.tasks import process_photo_message, process_voice_message
 
-            default_queue().enqueue(process_voice_message, str(message.id))
-            logger.info("Enqueued process_voice_message for id=%s", message.id)
+            queue = default_queue()
+            if msg_type == MessageType.voice:
+                queue.enqueue(process_voice_message, str(message.id))
+                logger.info("Enqueued process_voice_message for id=%s", message.id)
+            else:  # photo
+                queue.enqueue(process_photo_message, str(message.id), "twilio")
+                logger.info("Enqueued process_photo_message (twilio) for id=%s", message.id)
         except Exception:
             # Never fail the webhook on a queue hiccup - Twilio would retry forever.
-            logger.exception("Failed to enqueue voice processing for id=%s", message.id)
+            logger.exception("Failed to enqueue processing for id=%s", message.id)
 
     # Empty TwiML - reply happens via async worker -> Twilio REST in later phases.
     return Response(content="<Response/>", media_type="application/xml")

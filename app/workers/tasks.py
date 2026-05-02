@@ -5,12 +5,14 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.models import Message, MessageType
+from app.db.models import Message, MessageType, Photo
 from app.db.session import session_scope
+from app.services.exif import extract as extract_exif
 from app.services.storage import download_twilio_media
 from app.services.telegram import (
     download_telegram_media,
@@ -155,3 +157,100 @@ async def _process_telegram_voice_message(message_id: uuid.UUID) -> None:
 def process_telegram_voice_message(message_id: str) -> None:
     """Sync RQ entrypoint for Telegram voice messages."""
     asyncio.run(_process_telegram_voice_message(uuid.UUID(message_id)))
+
+
+def _photo_reply(exif: Any, lang: str = "de") -> str:
+    """German confirmation for a photo, including GPS + capture time when present."""
+    parts = ["📸 Foto erhalten."]
+    if exif.gps_lat is not None and exif.gps_lon is not None:
+        parts.append(f"Standort: {exif.gps_lat:.5f}°N, {exif.gps_lon:.5f}°E.")
+    if exif.captured_at is not None:
+        parts.append(f"Aufnahme: {exif.captured_at.strftime('%d.%m.%Y %H:%M')}.")
+    if exif.gps_lat is None and exif.captured_at is None:
+        parts.append("Hinweis: keine GPS- oder Zeitangaben im Bild gefunden.")
+    return " ".join(parts)
+
+
+async def _process_photo_message(
+    message_id: uuid.UUID,
+    *,
+    provider: str,
+) -> None:
+    """Photo pipeline: download → EXIF → persist Photo row → reply confirmation."""
+    async with session_scope() as db:
+        message = await db.get(Message, message_id)
+        if message is None:
+            logger.warning("process_photo_message: id=%s not found", message_id)
+            return
+        if message.processed:
+            logger.info("process_photo_message: id=%s already processed", message_id)
+            return
+        if message.type != MessageType.photo or not message.media_url:
+            logger.info("process_photo_message: id=%s is not photo/media", message_id)
+            return
+
+        try:
+            if provider == "telegram":
+                stored = await download_telegram_media(
+                    message.media_url,
+                    expected_content_type=message.media_content_type,
+                )
+            else:
+                stored = await download_twilio_media(
+                    message.media_url,
+                    twilio_sid=message.twilio_sid,
+                    expected_content_type=message.media_content_type,
+                )
+
+            exif = extract_exif(stored.path)
+
+            photo = Photo(
+                message_id=message.id,
+                file_path=str(stored.path),
+                storage_backend="local",
+                content_type=stored.content_type,
+                file_size_bytes=stored.size_bytes,
+                gps_lat=exif.gps_lat,
+                gps_lon=exif.gps_lon,
+                exif_timestamp=exif.captured_at,
+            )
+            db.add(photo)
+
+            payload = dict(message.payload or {})
+            payload["exif"] = {
+                "gps_lat": exif.gps_lat,
+                "gps_lon": exif.gps_lon,
+                "altitude_m": exif.gps_altitude_m,
+                "captured_at": exif.captured_at.isoformat() if exif.captured_at else None,
+                "camera_make": exif.camera_make,
+                "camera_model": exif.camera_model,
+                "width": exif.width,
+                "height": exif.height,
+            }
+            message.payload = payload
+            message.processed = True
+            message.processed_at = datetime.now(timezone.utc)
+
+            reply = _photo_reply(exif)
+            if provider == "telegram":
+                await telegram_send_text(int(message.from_number), reply)
+            else:
+                await send_text(message.from_number, reply)
+
+            logger.info(
+                "Stored photo for message id=%s gps=(%s,%s) provider=%s",
+                message.id,
+                exif.gps_lat,
+                exif.gps_lon,
+                provider,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Photo processing failed for id=%s", message_id)
+            message.processing_error = f"{type(exc).__name__}: {exc}"[:1000]
+            message.processed = False
+            raise
+
+
+def process_photo_message(message_id: str, provider: str = "twilio") -> None:
+    """Sync RQ entrypoint for photo messages."""
+    asyncio.run(_process_photo_message(uuid.UUID(message_id), provider=provider))
