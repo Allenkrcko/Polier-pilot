@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     twilio_whatsapp_from: str = "whatsapp:+14155238886"
     twilio_webhook_validate: bool = True
 
+    # --- Telegram ---
+    telegram_bot_token: SecretStr | None = None
+    telegram_webhook_secret: SecretStr | None = None
+
     # --- OpenAI ---
     openai_api_key: SecretStr
     openai_whisper_model: str = "whisper-1"

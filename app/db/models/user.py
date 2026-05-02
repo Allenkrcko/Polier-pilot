@@ -5,7 +5,7 @@ import enum
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum as SAEnum, ForeignKey, String
+from sqlalchemy import BigInteger, Boolean, Enum as SAEnum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,7 +39,14 @@ class User(UUIDPrimaryKey, TimestampMixin, Base):
         default=UserRole.polier,
     )
     # Stored in E.164 format including the "whatsapp:" prefix Twilio uses.
-    whatsapp_number: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    # Optional - users may exist with only a telegram_chat_id once we have multi-provider support.
+    whatsapp_number: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, unique=True, index=True
+    )
+    # Telegram numeric chat id (BIGINT - can exceed 32-bit on supergroups/channels).
+    telegram_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, unique=True, index=True
+    )
     language_pref: Mapped[str] = mapped_column(String(8), nullable=False, default="de")
     email: Mapped[str | None] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
