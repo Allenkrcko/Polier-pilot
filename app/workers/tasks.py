@@ -9,10 +9,19 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import settings
-from app.db.models import Message, MessageType, Photo
+from app.db.models import Message, MessageType, Photo, ReportSession, SessionStatus, User
 from app.db.session import session_scope
-from app.services.exif import extract as extract_exif
+from app.services import weather as weather_service
+from app.services.classifier import ClassificationResult, classify
+from app.services.exif import ExifData, extract as extract_exif
+from app.services.sessions import (
+    get_or_create_session,
+    local_today,
+    mark_session_pending_review,
+)
 from app.services.storage import download_twilio_media
 from app.services.telegram import (
     download_telegram_media,
@@ -49,6 +58,100 @@ def _confirmation_text(transcript: str, language: str) -> str:
     return f"✅ Verstanden ({_label_for(language)}): {snippet}"
 
 
+# Short German label per intent for the operator-facing log line / payload.
+_INTENT_LABEL_DE: dict[str, str] = {
+    "bautagebuch_entry": "Bautagebuch-Eintrag",
+    "aufmass": "Aufmaß",
+    "maengel": "Mängel",
+    "behinderung": "Behinderung",
+    "feierabend": "Feierabend",
+    "question": "Frage",
+    "smalltalk": "Smalltalk",
+}
+
+
+async def _load_user(db: AsyncSession, message: Message) -> User | None:
+    """Load the User who sent this message, if any."""
+    if message.user_id is None:
+        return None
+    return await db.get(User, message.user_id)
+
+
+async def _classify_and_bind_session(
+    db: AsyncSession,
+    message: Message,
+    *,
+    text: str,
+    detected_language: str | None,
+) -> tuple[ClassificationResult, ReportSession | None]:
+    """Run the classifier on `text`, persist to message, then bind a session."""
+    cls = await classify(text, detected_language=detected_language)
+
+    payload = dict(message.payload or {})
+    payload["classification"] = {
+        "intent": cls.intent,
+        "confidence": cls.confidence,
+        "language": cls.language,
+        "summary": cls.summary,
+        "mentions": cls.mentions,
+    }
+    message.payload = payload
+    message.classified_intent = cls.intent
+
+    user = await _load_user(db, message)
+    session: ReportSession | None = None
+    if user is not None:
+        session = await get_or_create_session(db, user=user)
+        if session is not None:
+            message.session_id = session.id
+            if cls.intent == "feierabend":
+                await mark_session_pending_review(db, session)
+    else:
+        logger.info(
+            "Skipping session bind for message id=%s (no resolved user)", message.id
+        )
+
+    logger.info(
+        "Classified message id=%s intent=%s lang=%s session=%s",
+        message.id,
+        cls.intent,
+        cls.language,
+        session.id if session else None,
+    )
+    return cls, session
+
+
+async def _enrich_message_with_weather(
+    message: Message,
+    *,
+    lat: float,
+    lon: float,
+    work_date,  # date - imported via from datetime import below
+) -> None:
+    """Cache an Open-Meteo snapshot on message.payload['weather']. Best-effort."""
+    payload = dict(message.payload or {})
+    if payload.get("weather"):
+        return
+    try:
+        snapshot = await weather_service.fetch(lat=lat, lon=lon, work_date=work_date)
+    except Exception as exc:  # noqa: BLE001 - weather is best-effort
+        logger.warning("Weather fetch failed for message %s: %s", message.id, exc)
+        return
+    payload["weather"] = {
+        "date": snapshot.date.isoformat(),
+        "lat": lat,
+        "lon": lon,
+        "temperature_min_c": snapshot.temperature_min_c,
+        "temperature_max_c": snapshot.temperature_max_c,
+        "temperature_mean_c": snapshot.temperature_mean_c,
+        "precipitation_mm": snapshot.precipitation_mm,
+        "weather_code": snapshot.weather_code,
+        "weather_code_text": snapshot.weather_code_text,
+        "summary_de": snapshot.summary_de,
+    }
+    message.payload = payload
+
+
 async def _process_voice_message(message_id: uuid.UUID) -> None:
     """Download → transcribe → persist transcript → reply Polieru."""
     async with session_scope() as db:
@@ -80,6 +183,11 @@ async def _process_voice_message(message_id: uuid.UUID) -> None:
                 "stored_path": str(stored.path),
             }
             message.payload = payload
+
+            await _classify_and_bind_session(
+                db, message, text=result.text, detected_language=result.language
+            )
+
             message.processed = True
             message.processed_at = datetime.now(timezone.utc)
 
@@ -136,6 +244,11 @@ async def _process_telegram_voice_message(message_id: uuid.UUID) -> None:
                 "stored_path": str(stored.path),
             }
             message.payload = payload
+
+            await _classify_and_bind_session(
+                db, message, text=result.text, detected_language=result.language
+            )
+
             message.processed = True
             message.processed_at = datetime.now(timezone.utc)
 
@@ -228,6 +341,28 @@ async def _process_photo_message(
                 "height": exif.height,
             }
             message.payload = payload
+
+            # Bind to today's session before enriching weather (so we can use
+            # the session's work_date for the historical lookup).
+            user = await _load_user(db, message)
+            session: ReportSession | None = None
+            if user is not None:
+                session = await get_or_create_session(db, user=user)
+                if session is not None:
+                    message.session_id = session.id
+
+            if (
+                session is not None
+                and exif.gps_lat is not None
+                and exif.gps_lon is not None
+            ):
+                await _enrich_message_with_weather(
+                    message,
+                    lat=exif.gps_lat,
+                    lon=exif.gps_lon,
+                    work_date=session.work_date,
+                )
+
             message.processed = True
             message.processed_at = datetime.now(timezone.utc)
 
