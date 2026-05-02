@@ -138,6 +138,7 @@ async def twilio_inbound(
     )
     db.add(message)
     await db.commit()
+    await db.refresh(message)
 
     logger.info(
         "Persisted Twilio message sid=%s type=%s from=<phone> media=%d",
@@ -145,6 +146,19 @@ async def twilio_inbound(
         msg_type.value,
         num_media,
     )
+
+    # Enqueue async processing for voice messages (Phase 2: transcription).
+    # Other types are persisted only; Phase 3 will route them too.
+    if msg_type == MessageType.voice and message.media_url:
+        try:
+            from app.workers.queue import default_queue
+            from app.workers.tasks import process_voice_message
+
+            default_queue().enqueue(process_voice_message, str(message.id))
+            logger.info("Enqueued process_voice_message for id=%s", message.id)
+        except Exception:
+            # Never fail the webhook on a queue hiccup - Twilio would retry forever.
+            logger.exception("Failed to enqueue voice processing for id=%s", message.id)
 
     # Empty TwiML - reply happens via async worker -> Twilio REST in later phases.
     return Response(content="<Response/>", media_type="application/xml")
