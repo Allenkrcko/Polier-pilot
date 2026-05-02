@@ -21,6 +21,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 # Native PG enums declared once and reused across columns / drops.
+# We pre-create them in upgrade() and pass create_type=False on the
+# postgresql.ENUM column types so Alembic does not retry CREATE TYPE
+# inside each create_table call.
 project_status = postgresql.ENUM(
     "planned", "active", "paused", "completed", "archived",
     name="project_status",
@@ -38,6 +41,46 @@ report_type = postgresql.ENUM(
     "bautagebuch", "aufmass", "maengel", "tagesbericht",
     name="report_type",
 )
+
+
+def _project_status_col() -> postgresql.ENUM:
+    return postgresql.ENUM(
+        "planned", "active", "paused", "completed", "archived",
+        name="project_status",
+        create_type=False,
+    )
+
+
+def _user_role_col() -> postgresql.ENUM:
+    return postgresql.ENUM(
+        "polier", "bauleiter", "gf", "admin",
+        name="user_role",
+        create_type=False,
+    )
+
+
+def _message_type_col() -> postgresql.ENUM:
+    return postgresql.ENUM(
+        "voice", "photo", "text", "video", "document", "other",
+        name="message_type",
+        create_type=False,
+    )
+
+
+def _session_status_col() -> postgresql.ENUM:
+    return postgresql.ENUM(
+        "open", "pending_review", "finalized", "cancelled",
+        name="session_status",
+        create_type=False,
+    )
+
+
+def _report_type_col() -> postgresql.ENUM:
+    return postgresql.ENUM(
+        "bautagebuch", "aufmass", "maengel", "tagesbericht",
+        name="report_type",
+        create_type=False,
+    )
 
 
 def upgrade() -> None:
@@ -75,15 +118,7 @@ def upgrade() -> None:
         sa.Column("start_date", sa.Date()),
         sa.Column("end_date", sa.Date()),
         sa.Column("vob_clauses", postgresql.JSONB()),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "planned", "active", "paused", "completed", "archived",
-                name="project_status",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("status", _project_status_col(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
@@ -102,11 +137,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column(
-            "role",
-            sa.Enum("polier", "bauleiter", "gf", "admin", name="user_role", create_type=False),
-            nullable=False,
-        ),
+        sa.Column("role", _user_role_col(), nullable=False),
         sa.Column("whatsapp_number", sa.String(length=32), nullable=False, unique=True),
         sa.Column("language_pref", sa.String(length=8), nullable=False),
         sa.Column("email", sa.String(length=255)),
@@ -134,15 +165,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("work_date", sa.Date(), nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "open", "pending_review", "finalized", "cancelled",
-                name="session_status",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("status", _session_status_col(), nullable=False),
         sa.Column("finalized_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -170,15 +193,7 @@ def upgrade() -> None:
             sa.ForeignKey("report_sessions.id", ondelete="SET NULL"),
         ),
         sa.Column("twilio_sid", sa.String(length=64), nullable=False, unique=True),
-        sa.Column(
-            "type",
-            sa.Enum(
-                "voice", "photo", "text", "video", "document", "other",
-                name="message_type",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("type", _message_type_col(), nullable=False),
         sa.Column("from_number", sa.String(length=32), nullable=False),
         sa.Column("to_number", sa.String(length=32), nullable=False),
         sa.Column("media_url", sa.String(length=1024)),
@@ -234,15 +249,7 @@ def upgrade() -> None:
             sa.ForeignKey("report_sessions.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column(
-            "type",
-            sa.Enum(
-                "bautagebuch", "aufmass", "maengel", "tagesbericht",
-                name="report_type",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("type", _report_type_col(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("content_json", postgresql.JSONB()),
         sa.Column("content_md", sa.Text()),

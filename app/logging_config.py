@@ -14,11 +14,19 @@ _API_KEY_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{20,})")
 
 
 class PIIScrubber(logging.Filter):
+    """Scrubs the *fully formatted* message so %s-substituted phone numbers
+    and API keys (which only exist after argument interpolation) are masked."""
+
     def filter(self, record: LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            msg = _PHONE_RE.sub("<phone>", record.msg)
-            msg = _API_KEY_RE.sub("<api-key>", msg)
-            record.msg = msg
+        try:
+            formatted = record.getMessage()
+        except Exception:
+            return True
+        scrubbed = _PHONE_RE.sub("<phone>", formatted)
+        scrubbed = _API_KEY_RE.sub("<api-key>", scrubbed)
+        if scrubbed != formatted:
+            record.msg = scrubbed
+            record.args = ()
         return True
 
 
