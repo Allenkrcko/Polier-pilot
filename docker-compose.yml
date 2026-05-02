@@ -71,7 +71,7 @@ services:
     volumes:
       - ./app:/app/app
       - storage_data:/app/storage
-    command: ["rq", "worker", "--url", "redis://redis:6379/0", "default"]
+    command: ["python", "-m", "app.workers.runner"]
 
 volumes:
   postgres_data:
