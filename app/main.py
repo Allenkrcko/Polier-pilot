@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app import __version__
+from app.api import webhooks
 from app.config import settings
 from app.db.session import engine
 from app.logging_config import configure_logging
@@ -37,6 +38,8 @@ app = FastAPI(
     description="AI-first construction site reporting for German FTTH/Tiefbau.",
     lifespan=lifespan,
 )
+
+app.include_router(webhooks.router)
 
 
 @app.get("/", include_in_schema=False)
