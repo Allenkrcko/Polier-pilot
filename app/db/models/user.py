@@ -14,6 +14,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKey
 if TYPE_CHECKING:
     from app.db.models.company import Company
     from app.db.models.message import Message
+    from app.db.models.project import Project
 
 
 class UserRole(str, enum.Enum):
@@ -50,8 +51,17 @@ class User(UUIDPrimaryKey, TimestampMixin, Base):
     language_pref: Mapped[str] = mapped_column(String(8), nullable=False, default="de")
     email: Mapped[str | None] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # MVP: each user has at most one currently-active project. Phase 4+ will
+    # let Claude infer the project from message content for multi-project Poliers.
+    current_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     company: Mapped[Company] = relationship(back_populates="users")
+    current_project: Mapped[Project | None] = relationship(foreign_keys=[current_project_id])
     messages: Mapped[list[Message]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
