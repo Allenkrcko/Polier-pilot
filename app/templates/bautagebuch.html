@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Bautagebuch {{ data.datum.strftime('%d.%m.%Y') }} — {{ data.baustelle }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 2.5cm 2cm 2.5cm 2cm;
+    @bottom-center {
+      content: "Seite " counter(page) " von " counter(pages);
+      font-size: 9pt;
+      color: #555;
+    }
+    @bottom-right {
+      content: "{{ company.name }} · Bautagebuch · {{ data.datum.strftime('%d.%m.%Y') }}";
+      font-size: 9pt;
+      color: #555;
+    }
+  }
+  body {
+    font-family: "DejaVu Sans", "Liberation Sans", sans-serif;
+    font-size: 11pt;
+    color: #111;
+    line-height: 1.4;
+  }
+  h1 { font-size: 18pt; margin: 0 0 4pt 0; }
+  h2 {
+    font-size: 12pt;
+    margin: 16pt 0 6pt 0;
+    padding-bottom: 2pt;
+    border-bottom: 1.5pt solid #1a3a6e;
+    color: #1a3a6e;
+  }
+  .header-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 1.5cm;
+    margin-bottom: 12pt;
+    padding: 10pt;
+    background: #f4f6fa;
+    border-left: 4pt solid #1a3a6e;
+  }
+  .header-grid div { margin-bottom: 3pt; }
+  .header-grid .label { color: #555; font-weight: bold; font-size: 9pt; text-transform: uppercase; letter-spacing: 0.5pt; }
+  .header-grid .value { font-size: 11pt; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 4pt;
+    font-size: 10pt;
+  }
+  th, td {
+    border: 0.5pt solid #ccc;
+    padding: 4pt 6pt;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #eef0f5;
+    font-weight: bold;
+    color: #1a3a6e;
+  }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  ul.simple { margin: 4pt 0; padding-left: 18pt; }
+  .empty { color: #888; font-style: italic; }
+  .vob-anzeige { color: #b00020; font-weight: bold; }
+  .warnings {
+    margin-top: 16pt;
+    padding: 10pt;
+    background: #fff8e0;
+    border-left: 4pt solid #d39e00;
+    font-size: 10pt;
+  }
+  .warnings h3 { margin: 0 0 4pt 0; font-size: 10pt; color: #8a6a00; }
+  .signature {
+    margin-top: 28pt;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 2cm;
+  }
+  .signature .line {
+    border-top: 0.5pt solid #333;
+    padding-top: 3pt;
+    margin-top: 28pt;
+    font-size: 9pt;
+    color: #555;
+  }
+  .footer-notice {
+    margin-top: 24pt;
+    font-size: 8pt;
+    color: #666;
+    border-top: 0.5pt solid #ddd;
+    padding-top: 6pt;
+  }
+</style>
+</head>
+<body>
+
+<h1>Bautagebuch</h1>
+<div style="font-size: 11pt; color: #555;">
+  Erstellt nach VOB/B §6 · Generiert am {{ generated_at.strftime('%d.%m.%Y %H:%M') }} (MEZ)
+</div>
+
+<div class="header-grid">
+  <div><span class="label">Datum:</span><br><span class="value">{{ data.datum.strftime('%d.%m.%Y') }}</span></div>
+  <div><span class="label">Polier:</span><br><span class="value">{{ data.polier_name or '—' }}</span></div>
+  <div><span class="label">Baustelle:</span><br><span class="value">{{ data.baustelle }}</span></div>
+  <div><span class="label">Projekt-Nr.:</span><br><span class="value">{{ data.projekt_nr or '—' }}</span></div>
+  <div><span class="label">Auftragnehmer:</span><br><span class="value">{{ company.name }}</span></div>
+  <div><span class="label">Auftraggeber:</span><br><span class="value">{{ project.auftraggeber or '—' }}</span></div>
+</div>
+
+<h2>1. Wetter & Arbeitszeit</h2>
+<table>
+  <tr>
+    <th style="width: 30%;">Wetter</th>
+    <td>{{ data.wetter or '<span class="empty">nicht erfasst</span>' | safe }}</td>
+  </tr>
+  <tr>
+    <th>Temperatur</th>
+    <td>{% if data.temperatur_celsius is not none %}{{ '%.1f' | format(data.temperatur_celsius) }} °C{% else %}<span class="empty">—</span>{% endif %}</td>
+  </tr>
+  <tr>
+    <th>Arbeitsbeginn</th>
+    <td>{{ data.arbeitszeit.beginn or '—' }}</td>
+  </tr>
+  <tr>
+    <th>Arbeitsende</th>
+    <td>{{ data.arbeitszeit.ende or '—' }}</td>
+  </tr>
+  <tr>
+    <th>Pause (Min)</th>
+    <td>{{ data.arbeitszeit.pause_minuten or '—' }}</td>
+  </tr>
+  <tr>
+    <th>Stunden gesamt</th>
+    <td>{% if data.stunden_gesamt is not none %}{{ '%.2f' | format(data.stunden_gesamt) }} h{% else %}<span class="empty">—</span>{% endif %}</td>
+  </tr>
+</table>
+
+<h2>2. Anwesende Kolonnen</h2>
+{% if data.anwesende_kolonnen %}
+<table>
+  <thead><tr><th>Firma</th><th>Personen</th><th>Gewerk</th></tr></thead>
+  <tbody>
+  {% for k in data.anwesende_kolonnen %}
+    <tr>
+      <td>{{ k.firma }}</td>
+      <td class="num">{{ k.personen or '—' }}</td>
+      <td>{{ k.gewerk or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Keine Angaben.</p>
+{% endif %}
+
+<h2>3. Ausgeführte Arbeiten</h2>
+{% if data.ausgefuehrte_arbeiten %}
+<table>
+  <thead><tr><th>Position</th><th>Menge</th><th>Einheit</th><th>Ort</th></tr></thead>
+  <tbody>
+  {% for a in data.ausgefuehrte_arbeiten %}
+    <tr>
+      <td>{{ a.position }}</td>
+      <td class="num">{{ a.menge if a.menge is not none else '—' }}</td>
+      <td>{{ a.einheit or '' }}</td>
+      <td>{{ a.ort or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Keine Angaben.</p>
+{% endif %}
+
+<h2>4. Geräteeinsatz</h2>
+{% if data.geraete_einsatz %}
+<table>
+  <thead><tr><th>Gerät</th><th>Stunden</th></tr></thead>
+  <tbody>
+  {% for g in data.geraete_einsatz %}
+    <tr><td>{{ g.geraet }}</td><td class="num">{{ g.stunden if g.stunden is not none else '—' }} h</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Keine Angaben.</p>
+{% endif %}
+
+<h2>5. Materiallieferungen</h2>
+{% if data.materiallieferungen %}
+<table>
+  <thead><tr><th>Material</th><th>Menge</th><th>Einheit</th><th>Lieferant</th></tr></thead>
+  <tbody>
+  {% for m in data.materiallieferungen %}
+    <tr>
+      <td>{{ m.material }}</td>
+      <td class="num">{{ m.menge if m.menge is not none else '—' }}</td>
+      <td>{{ m.einheit or '' }}</td>
+      <td>{{ m.lieferant or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Keine Angaben.</p>
+{% endif %}
+
+<h2>6. Besondere Vorkommnisse</h2>
+{% if data.besondere_vorkommnisse %}
+<ul class="simple">
+{% for v in data.besondere_vorkommnisse %}<li>{{ v }}</li>{% endfor %}
+</ul>
+{% else %}
+<p class="empty">Keine.</p>
+{% endif %}
+
+<h2>7. Behinderungen (VOB/B §6)</h2>
+{% if data.behinderungen %}
+<table>
+  <thead><tr><th>Art</th><th>VOB-Anzeige</th><th>Beschreibung</th></tr></thead>
+  <tbody>
+  {% for b in data.behinderungen %}
+    <tr>
+      <td>{{ b.art }}</td>
+      <td>{% if b.vob_anzeige %}<span class="vob-anzeige">JA — Anzeige hiermit erfolgt</span>{% else %}nein{% endif %}</td>
+      <td>{{ b.beschreibung or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Keine.</p>
+{% endif %}
+
+{% if data.fotos_referenz %}
+<h2>8. Fotodokumentation</h2>
+<p>Anhängende Foto-IDs ({{ data.fotos_referenz | length }}):</p>
+<ul class="simple">
+{% for fid in data.fotos_referenz %}<li><code>{{ fid }}</code></li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if data.warnungen %}
+<div class="warnings">
+  <h3>⚠ Warnungen / fehlende Angaben</h3>
+  <ul class="simple">
+  {% for w in data.warnungen %}<li>{{ w }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="signature">
+  <div>
+    <div>Polier:</div>
+    <div class="line">{{ data.polier_name or '___________________________' }} · Datum: {{ data.datum.strftime('%d.%m.%Y') }}</div>
+  </div>
+  <div>
+    <div>Bauleiter (Freigabe):</div>
+    <div class="line">___________________________ · Datum: ___________</div>
+  </div>
+</div>
+
+<div class="footer-notice">
+  Dokumentiert nach VOB/B §6 sowie BGB §650b. Aufzeichnungen werden gemäß §14b VOB/B
+  aufbewahrt. Generiert durch Polier-Pilot, basierend auf Sprachnachrichten und
+  Fotodokumentation des Poliers vom angegebenen Arbeitstag.
+</div>
+
+</body>
+</html>
