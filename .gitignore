@@ -45,6 +45,7 @@ media/
 *.sqlite
 *.sqlite3
 *.db
+*.rdb
 
 # Logs
 *.log

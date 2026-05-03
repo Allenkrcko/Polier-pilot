@@ -1,0 +1,13 @@
+# Codespaces overlay - merged on top of the project's docker-compose.yml.
+# Keeps `app` alive as a dev shell; uvicorn runs from postStartCommand.
+services:
+  app:
+    volumes:
+      - ..:/workspace:cached
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+
+  worker:
+    # In Codespaces we run the worker manually from a terminal so the developer
+    # can see logs interactively. Disable auto-start.
+    profiles: ["manual"]
