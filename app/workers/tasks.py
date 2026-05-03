@@ -552,3 +552,133 @@ async def _generate_bautagebuch(session_id: uuid.UUID) -> None:
 def generate_bautagebuch(session_id: str) -> None:
     """Sync RQ entrypoint for Bautagebuch generation."""
     asyncio.run(_generate_bautagebuch(uuid.UUID(session_id)))
+
+
+# ---------------------------------------------------------------------------
+# Text + confirmation handling (Phase 4.5)
+# ---------------------------------------------------------------------------
+
+# Tokens we accept as a Bautagebuch confirmation. Stripped of whitespace,
+# lower-cased, then exact-matched. Keep this list short - anything else
+# falls through to the classifier as a normal text message.
+_CONFIRMATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "✅",
+        "✔",
+        "ok",
+        "okay",
+        "k.o",
+        "okej",
+        "in ordnung",
+        "bestätigt",
+        "bestaetigt",
+        "freigegeben",
+        "freigabe",
+        "yes",
+        "ja",
+        "da",
+        "potvrđujem",
+        "potvrdjujem",
+        "potvrda",
+        "u redu",
+        "tak",
+        "potwierdzam",
+        "evet",
+        "tamam",
+    }
+)
+
+
+def _is_confirmation(text: str | None) -> bool:
+    if not text:
+        return False
+    return text.strip().lower() in _CONFIRMATION_TOKENS
+
+
+async def _confirm_pending_report(
+    db: AsyncSession,
+    *,
+    user: User,
+) -> Report | None:
+    """Find the user's most recent unconfirmed Bautagebuch and confirm it."""
+    candidate = await db.scalar(
+        select(Report)
+        .join(ReportSession, ReportSession.id == Report.session_id)
+        .where(
+            ReportSession.user_id == user.id,
+            Report.type == ReportType.bautagebuch,
+            Report.confirmed_at.is_(None),
+        )
+        .order_by(Report.created_at.desc())
+        .limit(1)
+    )
+    if candidate is None:
+        return None
+    candidate.confirmed_at = datetime.now(timezone.utc)
+    session = await db.get(ReportSession, candidate.session_id)
+    if session is not None:
+        session.status = SessionStatus.finalized
+        session.finalized_at = datetime.now(timezone.utc)
+    logger.info(
+        "Confirmed Bautagebuch report=%s session=%s by user=%s",
+        candidate.id,
+        candidate.session_id,
+        user.id,
+    )
+    return candidate
+
+
+async def _process_text_message(
+    message_id: uuid.UUID,
+    *,
+    provider: str,
+) -> None:
+    """Text pipeline: check for confirmation token, else classify + bind session."""
+    async with session_scope() as db:
+        message = await db.get(Message, message_id)
+        if message is None:
+            logger.warning("process_text_message: id=%s not found", message_id)
+            return
+        if message.processed:
+            return
+        if message.type != MessageType.text or not message.raw_text:
+            return
+
+        try:
+            user = await _load_user(db, message)
+
+            if user is not None and _is_confirmation(message.raw_text):
+                report = await _confirm_pending_report(db, user=user)
+                if report is not None:
+                    reply = "✅ Bautagebuch bestätigt. Bauleiter wird informiert."
+                else:
+                    reply = "Danke. Aktuell ist kein Bautagebuch zur Bestätigung offen."
+                message.classified_intent = "confirmation"
+                message.processed = True
+                message.processed_at = datetime.now(timezone.utc)
+                if provider == "telegram":
+                    await telegram_send_text(int(message.from_number), reply)
+                else:
+                    await send_text(message.from_number, reply)
+                return
+
+            # Otherwise treat as a normal text message: classify + bind session.
+            await _classify_and_bind_session(
+                db,
+                message,
+                text=message.raw_text,
+                detected_language=None,
+            )
+
+            message.processed = True
+            message.processed_at = datetime.now(timezone.utc)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Text processing failed for id=%s", message_id)
+            message.processing_error = f"{type(exc).__name__}: {exc}"[:1000]
+            message.processed = False
+            raise
+
+
+def process_text_message(message_id: str, provider: str = "twilio") -> None:
+    """Sync RQ entrypoint for text messages."""
+    asyncio.run(_process_text_message(uuid.UUID(message_id), provider=provider))

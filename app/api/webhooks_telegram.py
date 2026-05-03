@@ -150,22 +150,25 @@ async def telegram_inbound(
         file_id,
     )
 
-    if file_id and msg_type in (MessageType.voice, MessageType.photo):
-        try:
-            from app.workers.queue import default_queue
-            from app.workers.tasks import (
-                process_photo_message,
-                process_telegram_voice_message,
-            )
+    try:
+        from app.workers.queue import default_queue
+        from app.workers.tasks import (
+            process_photo_message,
+            process_telegram_voice_message,
+            process_text_message,
+        )
 
-            queue = default_queue()
-            if msg_type == MessageType.voice:
-                queue.enqueue(process_telegram_voice_message, str(persisted.id))
-                logger.info("Enqueued process_telegram_voice_message for id=%s", persisted.id)
-            else:  # photo
-                queue.enqueue(process_photo_message, str(persisted.id), "telegram")
-                logger.info("Enqueued process_photo_message (telegram) for id=%s", persisted.id)
-        except Exception:
-            logger.exception("Failed to enqueue Telegram processing for id=%s", persisted.id)
+        queue = default_queue()
+        if msg_type == MessageType.voice and file_id:
+            queue.enqueue(process_telegram_voice_message, str(persisted.id))
+            logger.info("Enqueued process_telegram_voice_message for id=%s", persisted.id)
+        elif msg_type == MessageType.photo and file_id:
+            queue.enqueue(process_photo_message, str(persisted.id), "telegram")
+            logger.info("Enqueued process_photo_message (telegram) for id=%s", persisted.id)
+        elif msg_type == MessageType.text and text:
+            queue.enqueue(process_text_message, str(persisted.id), "telegram")
+            logger.info("Enqueued process_text_message (telegram) for id=%s", persisted.id)
+    except Exception:
+        logger.exception("Failed to enqueue Telegram processing for id=%s", persisted.id)
 
     return {"ok": "received"}
