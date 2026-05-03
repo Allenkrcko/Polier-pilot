@@ -131,11 +131,22 @@ def install_mocks() -> None:
         sent_log.append({"chat_id": chat_id, "body": body})
         return SentMessage(message_id=999, chat_id=chat_id, text=body)
 
+    async def fake_classify(text, *, detected_language=None, client=None):
+        from app.services.classifier import ClassificationResult
+        return ClassificationResult(
+            intent="bautagebuch_entry",
+            confidence=0.9,
+            language=detected_language or "hr",
+            summary="Heute wurden 120 m FTTH-Kabel in der Birkenstraße verlegt.",
+            mentions={},
+        )
+
     tasks.download_telegram_media = fake_download  # type: ignore[assignment]
     tasks.transcribe = fake_transcribe  # type: ignore[assignment]
     tasks.telegram_send_text = fake_send_text  # type: ignore[assignment]
+    tasks.classify = fake_classify  # type: ignore[assignment]
     tasks._E2E_TG_SENT = sent_log  # type: ignore[attr-defined]
-    print("download_telegram_media / transcribe / telegram_send_text -> stubbed")
+    print("download_telegram_media / transcribe / telegram_send_text / classify -> stubbed")
 
 
 async def run_worker(message_id: uuid.UUID) -> None:

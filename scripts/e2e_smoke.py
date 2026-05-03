@@ -113,12 +113,25 @@ def install_mocks() -> None:
         sent_log.append({"to": to, "body": body})
         return SentMessage(sid="SMfake", status="queued", to=to)
 
+    # Phase 3 added a classifier call inside the voice pipeline. Stub it so
+    # the smoke runs without a real Anthropic key.
+    async def fake_classify(text, *, detected_language=None, client=None):
+        from app.services.classifier import ClassificationResult
+        return ClassificationResult(
+            intent="bautagebuch_entry",
+            confidence=0.9,
+            language=detected_language or "hr",
+            summary="Heute wurden 80 m FTTH-Kabel verlegt.",
+            mentions={},
+        )
+
     # Patch the names that worker.tasks resolved at import time.
     tasks.download_twilio_media = fake_download  # type: ignore[assignment]
     tasks.transcribe = fake_transcribe  # type: ignore[assignment]
     tasks.send_text = fake_send_text  # type: ignore[assignment]
+    tasks.classify = fake_classify  # type: ignore[assignment]
     tasks._E2E_SENT_LOG = sent_log  # type: ignore[attr-defined]
-    print("download / transcribe / send_text -> stubbed")
+    print("download / transcribe / send_text / classify -> stubbed")
 
 
 async def run_worker_task(message_id: uuid.UUID) -> None:
