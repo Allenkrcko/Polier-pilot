@@ -144,6 +144,55 @@ async def download_telegram_media(
     retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
     reraise=True,
 )
+async def send_document(
+    chat_id: int,
+    file_path: Path,
+    *,
+    caption: str | None = None,
+    file_name: str | None = None,
+    mime_type: str = "application/pdf",
+    client: httpx.AsyncClient | None = None,
+) -> SentMessage:
+    """Upload a file (PDF, image, etc.) via sendDocument multipart."""
+    if not file_path.exists():
+        raise FileNotFoundError(file_path)
+
+    url = f"{_API_BASE}/bot{_bot_token()}/sendDocument"
+    own_client = client is None
+    client = client or httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
+    try:
+        with file_path.open("rb") as fh:
+            files = {
+                "document": (file_name or file_path.name, fh, mime_type),
+            }
+            data: dict[str, Any] = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption[:1024]  # Telegram caption limit
+            resp = await client.post(url, data=data, files=files)
+        if resp.status_code >= 400:
+            if resp.status_code < 500:
+                raise TelegramError(resp.status_code, resp.text)
+            resp.raise_for_status()
+        body = resp.json()
+        if not body.get("ok"):
+            raise TelegramError(resp.status_code, resp.text)
+        result = body["result"]
+        return SentMessage(
+            message_id=int(result["message_id"]),
+            chat_id=int(result["chat"]["id"]),
+            text=result.get("caption", ""),
+        )
+    finally:
+        if own_client:
+            await client.aclose()
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+    reraise=True,
+)
 async def send_text(
     chat_id: int,
     body: str,
