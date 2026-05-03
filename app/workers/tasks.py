@@ -9,14 +9,28 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.db.models import Message, MessageType, Photo, ReportSession, SessionStatus, User
+from app.db.models import (
+    Company,
+    Message,
+    MessageType,
+    Photo,
+    Report,
+    ReportSession,
+    ReportType,
+    SessionStatus,
+    User,
+)
 from app.db.session import session_scope
 from app.services import weather as weather_service
 from app.services.classifier import ClassificationResult, classify
 from app.services.exif import ExifData, extract as extract_exif
+from app.services.pdf_renderer import render_bautagebuch
+from app.services.report_generator import generate_for_session
 from app.services.sessions import (
     get_or_create_session,
     local_today,
@@ -25,6 +39,7 @@ from app.services.sessions import (
 from app.services.storage import download_twilio_media
 from app.services.telegram import (
     download_telegram_media,
+    send_document as telegram_send_document,
     send_text as telegram_send_text,
 )
 from app.services.transcription import transcribe
@@ -106,6 +121,7 @@ async def _classify_and_bind_session(
             message.session_id = session.id
             if cls.intent == "feierabend":
                 await mark_session_pending_review(db, session)
+                _enqueue_bautagebuch(session.id)
     else:
         logger.info(
             "Skipping session bind for message id=%s (no resolved user)", message.id
@@ -389,3 +405,150 @@ async def _process_photo_message(
 def process_photo_message(message_id: str, provider: str = "twilio") -> None:
     """Sync RQ entrypoint for photo messages."""
     asyncio.run(_process_photo_message(uuid.UUID(message_id), provider=provider))
+
+
+# ---------------------------------------------------------------------------
+# Bautagebuch generation (Phase 4)
+# ---------------------------------------------------------------------------
+
+_BAUTAGEBUCH_CAPTION_DE = (
+    "📄 Bautagebuch fertig.\n"
+    "Bitte bestätigen mit ✅ oder Änderungen schreiben."
+)
+
+
+def _enqueue_bautagebuch(session_id: uuid.UUID) -> None:
+    """Defer-import the queue to avoid circular imports at module load."""
+    from app.workers.queue import default_queue
+
+    try:
+        default_queue().enqueue(generate_bautagebuch, str(session_id))
+        logger.info("Enqueued generate_bautagebuch for session=%s", session_id)
+    except Exception:
+        logger.exception("Failed to enqueue generate_bautagebuch session=%s", session_id)
+
+
+async def _provider_for_session(db: AsyncSession, session: ReportSession) -> str:
+    """Inspect the session's first message to decide telegram vs twilio reply."""
+    last = await db.scalar(
+        select(Message)
+        .where(Message.session_id == session.id)
+        .order_by(Message.received_at.desc())
+        .limit(1)
+    )
+    if last is None or not last.payload:
+        return "twilio"
+    return str(last.payload.get("provider") or "twilio")
+
+
+async def _send_bautagebuch_pdf(
+    *,
+    db: AsyncSession,
+    session: ReportSession,
+    pdf_path,  # Path - local imports break ordering
+    user: User,
+) -> None:
+    provider = await _provider_for_session(db, session)
+    if provider == "telegram":
+        if user.telegram_chat_id is None:
+            logger.warning(
+                "Cannot send Bautagebuch PDF: user %s has no telegram_chat_id",
+                user.id,
+            )
+            return
+        await telegram_send_document(
+            user.telegram_chat_id,
+            pdf_path,
+            caption=_BAUTAGEBUCH_CAPTION_DE,
+            file_name=f"Bautagebuch_{session.work_date.isoformat()}.pdf",
+        )
+    else:
+        # Twilio path: PDF requires a public URL. For MVP we just send a
+        # text confirmation; full media-out comes in Phase 6 with S3.
+        await send_text(
+            user.whatsapp_number or "",
+            _BAUTAGEBUCH_CAPTION_DE
+            + f"\n(PDF lokal gespeichert: {pdf_path.name})",
+        )
+
+
+async def _generate_bautagebuch(session_id: uuid.UUID) -> None:
+    """Aggregate session → Sonnet → PDF → reply Polier."""
+    # 1. Fetch session + relations needed for renderer.
+    async with session_scope() as db:
+        session = await db.scalar(
+            select(ReportSession)
+            .where(ReportSession.id == session_id)
+            .options(
+                selectinload(ReportSession.project),
+                selectinload(ReportSession.user),
+                selectinload(ReportSession.reports),
+            )
+        )
+        if session is None:
+            logger.warning("generate_bautagebuch: session %s not found", session_id)
+            return
+
+        # Idempotency: if there's already a v1 bautagebuch report for this
+        # session, skip. (Phase 5 will handle revisions/v2.)
+        existing = next(
+            (r for r in session.reports if r.type == ReportType.bautagebuch),
+            None,
+        )
+        if existing is not None and existing.pdf_path:
+            logger.info(
+                "Bautagebuch already exists for session=%s (report=%s); skipping",
+                session_id,
+                existing.id,
+            )
+            return
+
+        project = session.project
+        # SQLAlchemy 2.0 selectinload of "company" via string requires lazy
+        # access; force-load explicitly to be safe inside this function.
+        company = await db.scalar(select(Company).where(Company.id == project.company_id))
+        user = session.user
+
+    # 2. Generate the structured Bautagebuch via Sonnet (uses its own session_scope).
+    data = await generate_for_session(session_id)
+
+    # 3. Render PDF (sync but cheap; ~50ms typical).
+    rendered = render_bautagebuch(
+        data,
+        company=company,
+        project=project,
+        session_id=str(session_id),
+    )
+
+    # 4. Persist Report row, mark session pending_review (already), reply Polier.
+    async with session_scope() as db:
+        session = await db.get(ReportSession, session_id)
+        if session is None:
+            return
+        report = Report(
+            session_id=session.id,
+            type=ReportType.bautagebuch,
+            version=1,
+            content_json=data.as_dict(),
+            content_md=None,
+            pdf_path=str(rendered.pdf_path),
+        )
+        db.add(report)
+        await db.flush()
+
+        user_obj = await db.get(User, session.user_id)
+        if user_obj is not None:
+            await _send_bautagebuch_pdf(
+                db=db, session=session, pdf_path=rendered.pdf_path, user=user_obj
+            )
+        logger.info(
+            "Generated Bautagebuch session=%s report=%s pdf=%s",
+            session_id,
+            report.id,
+            rendered.pdf_path,
+        )
+
+
+def generate_bautagebuch(session_id: str) -> None:
+    """Sync RQ entrypoint for Bautagebuch generation."""
+    asyncio.run(_generate_bautagebuch(uuid.UUID(session_id)))
